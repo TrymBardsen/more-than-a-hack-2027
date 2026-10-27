@@ -1,0 +1,7 @@
+line-length = 100
+target-version = "py38"
+# Organiser code (official scorer, starter scripts and notebooks) is left as shipped.
+extend-exclude = ["data", "evaluation", "starter", "*.ipynb"]
+
+[lint]
+select = ["E", "F", "W"]
