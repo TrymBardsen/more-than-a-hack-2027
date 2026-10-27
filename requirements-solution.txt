@@ -1,0 +1,4 @@
+# Exact versions the submission was generated with (Python 3.12.14). solution/pipeline.py needs
+# nothing else; requirements.txt (the organisers' file) leaves these unpinned.
+numpy==2.5.4
+pandas==3.1.0

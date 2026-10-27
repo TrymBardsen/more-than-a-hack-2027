@@ -62,3 +62,16 @@ __pycache__/
 venv/
 env/
 .DS_Store
+.claude/
+CLAUDE.md
+
+# hidden output of tools/run_blind.py
+.blind_logs/
+
+# experiment runs: submissions and scores from tools/experiment.py
+experiments/
+
+# hand-labelled validation set: derived from the video, keep it private
+validation/*
+!validation/intervals_template.csv
+!validation/README.md
