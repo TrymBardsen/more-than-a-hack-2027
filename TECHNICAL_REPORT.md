@@ -227,7 +227,12 @@ On this window the per-frame measures improved with the learned model and spellF
 ## Limitations, and what we would do with more time
 
 - **Short possessions.** On the dev set we match few possessions under 5 s, and they make up about 40% of all possessions. The learned evidence improved per-frame accuracy a lot, but the decoder still needs about one solid touch to switch. A model that predicts *the moment of a change* directly, rather than who has the ball, would target this best.
-- **Dead ball** is still hand-built and over-predicted (40% against a likely 25–30%). A learned dead-ball model was left out because the sample data drops the ball when it goes out: it would learn "ball missing means dead", which is much less true in our tracking.
+- **Ball gaps.** To see what goes wrong while the ball is missing, we took live play where the sample *did* track the ball and hid it with this match's gap pattern (63,805 frames, scored on a match the model never saw):
+  - 64.6% get the right team, 17.4% the wrong team, and 18.0% are labelled dead.
+  - Most of the false dead ball comes from the slow-players signal (76%, including frames where the stoppage detector also fired). Players stroll during slow build-up, as they do at stoppages.
+  - We tried counting slow players in full only when a stoppage was confirmed (stoppage detector active, or the ball vanished within 3 m of a line). At weight 0 for unconfirmed slowness this cut false dead on live play from 18% to 8%, but it also cut dead-ball recall from 86% to 47% and spellF1 from 0.545 to 0.512. Intermediate weights were in between, so we dropped the idea: slow players are the main way real stoppages get caught.
+  - The wrong-team share is the other half of the gap. Deciding each gap as a whole would target it: who touched the ball at each end, plus a turnover signal.
+- **Dead ball** is still hand-built and over-predicted: 39% predicted on the dev set against 26.5% in its labels, and 40% on our match. The dev labels themselves miss stoppages that have no event, such as offside or fouls without a FAULT RECEIVED, so part of the gap is in the labels. A learned dead-ball model was left out because the sample data drops the ball when it goes out: it would learn "ball missing means dead", which is much less true in our tracking.
 - **The dev set is an approximation of our data.**
   - Its labels come from events, not corrected tracking.
   - Its ball gaps lean towards dead ball.
