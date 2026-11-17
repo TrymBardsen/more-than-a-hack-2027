@@ -53,6 +53,8 @@ EVENT_DEAD = 1.0          # per-frame dead evidence inside a detected stoppage
 RECEPTION = 4.0           # extra team evidence per frame at a reception (fast ball stopped at a player)
 TEAM_SWITCH = 25.0        # ~1 s of clear control needed to hand possession over (dev-set tuned)
 DEAD_SWITCH = 20.0        # cost of entering or leaving a stoppage (dev-set tuned)
+SNAP = 50                 # move each H<->A boundary to the new team's first clear touch within +-2 s (dev-set tuned; 0 = off)
+TOUCH = 1.0               # team evidence at or above this counts as a clear touch for snapping
 CLIP = 3.0                # cap on per-frame evidence so one frame never decides alone
 TAG_WEIGHT = 0.2          # Smart Tagging phase team, per frame, only where the ball is missing
 SHAPE_WEIGHT = 0.2        # team-shape model, per frame, only where the ball is missing
@@ -262,6 +264,30 @@ def shape_logit(X, model):
     return np.c_[np.ones(len(X)), (X - mu) / sd] @ w
 
 
+def snap(labels, touch, window):
+    """Move each direct H<->A boundary to the new team's first clear touch within +-window frames,
+    if the old team has no clear touch after it. touch: +1 home touch, -1 away touch, 0 none."""
+    out = labels.copy()
+    flips = np.flatnonzero((labels[1:] != labels[:-1]) & np.isin(labels[1:], ["H", "A"])
+                           & np.isin(labels[:-1], ["H", "A"])) + 1
+    for t in flips:
+        new = 1 if labels[t] == "H" else -1
+        lo, hi = max(t - window, 0), min(t + window + 1, len(labels))
+        seg = touch[lo:hi]
+        last_old = np.flatnonzero(seg == -new)
+        cand = np.flatnonzero(seg == new)
+        if len(last_old):
+            cand = cand[cand > last_old[-1]]
+        if not len(cand):
+            continue
+        f = lo + cand[0]
+        if f < t and np.all(np.isin(out[f:t], ["H", "A"])):
+            out[f:t] = labels[t]
+        elif f > t and np.all(np.isin(out[t:f], ["H", "A"])):
+            out[t:f] = labels[t - 1]
+    return out
+
+
 def decode(team, dead, blocks):
     labels = np.full(len(team), "X", dtype="<U1")
     for first, last in blocks:
@@ -303,6 +329,9 @@ def run(players, ball, team_of_track, pitch, blocks, starts=frozenset(), tag_vot
             print("shape model: trained on {} frames, agreement {:.3f}".format(train.sum(), acc))
         team = team + np.where(seen, 0.0, shape_weight * logit)
         labels = decode(team, dead, blocks)
+    if SNAP:
+        touch = np.where(seen & (np.abs(team) >= TOUCH), np.sign(team), 0)
+        labels = snap(labels, touch, SNAP)
     return labels
 
 
@@ -332,6 +361,12 @@ def _selftest():
     speed = 25 * np.hypot(np.diff(bx, prepend=np.nan), np.diff(by, prepend=np.nan))
     dead = stoppages(bx, by, speed, set(), (105.3, 68.0))
     assert dead[45] and dead[150] and not dead[-1] and not dead[10], np.flatnonzero(dead)[[0, -1]]
+    # snapping moves a late boundary back to the new team's first touch, and never past an old touch
+    labels = np.array(list("HHHHHHHHHHAAAAA"))
+    touch = np.array([1, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0, 0])
+    assert "".join(snap(labels, touch, 5)) == "HHHHHHAAAAAAAAA"
+    touch[8] = 1
+    assert "".join(snap(labels, touch, 5)) == "HHHHHHHHHHAAAAA"
 
 
 if __name__ == "__main__":

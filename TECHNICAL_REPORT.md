@@ -14,7 +14,7 @@ Its parameters were tuned on a labelled dev set built from **two other matches**
 
 No human labels on the competition match were used anywhere, and nothing was fitted to its public 5 minutes.
 
-The code is about 600 lines of numpy and pandas across three files. Producing the submission takes about 4 seconds and is byte-for-byte reproducible.
+The code is about 650 lines of numpy and pandas across three files. Producing the submission takes about 4 seconds and is byte-for-byte reproducible.
 
 ## Why a state model
 
@@ -95,6 +95,7 @@ All distances are in metres, using the pitch size from `games.py` (105.3 × 68.0
 The Viterbi path runs over each half separately.
 - **Emission scores:** H gets `+team/2`, A gets `−team/2`, D gets the dead evidence.
 - **Transition costs** *(tuned)*: H↔A costs 25, and entering or leaving D costs 20.
+- **Boundary snapping** *(tuned)*: after decoding, each direct H↔A boundary moves to the new team's first clear touch (team evidence of 1 or more) within ±2 s, unless the old team touches the ball again after that touch. On the dev set this improved all four runs, by +0.001 to +0.006 spellF1. A ±4 s window was no better and less consistent.
 
 The rules this encodes:
 - **A change of possession needs sustained control.** About one second of clear evidence that the other team is on the ball, or a reception (a fast ball stopped at a player), which pays for most of the switch at once. A deflection, a touch without control, or a pass that brushes an opponent doesn't pay the switching cost, so possession stays with the last team. This is the challenge's "loose or contested ball stays with the last team in possession".
@@ -148,6 +149,15 @@ The gains after the slow-players threshold are each near the noise level. Togeth
 - **It predicts too few possessions:** 866 against 1,330 labelled across the four runs. Lowering the switching cost to catch more of them lowers spellF1, so the missed ones are mostly too short to see reliably in noisy tracking.
 - **It over-predicts dead ball:** 39–43% predicted against 26–27% labelled, with dead-ball recall about 0.87 and precision about 0.55. That is what maximises spellF1 there: a short stretch of `D` around an uncertain hand-over costs less than a wrong team.
 
+**Leave one match out.** To check that the tuning isn't just memorising two matches, `python devset.py --lomo` starts from the hand-set settings, tunes on one sample match only (both noise conditions), and scores the other:
+
+| tune on → test on | hand-set settings | tuned on the other match | submitted settings (tuned on both) |
+|---|---|---|---|
+| game 1 → game 2 | 0.427 | **0.492** (+0.065) | 0.502 |
+| game 2 → game 1 | 0.409 | **0.458** (+0.049) | 0.461 |
+
+Tuning on one match delivers most of the gain on a match it never saw. Both runs also land on nearly the same settings: slow players 1.5 m/s, reception weight 4, dead switch 20, team switch 20 or 25. The settings generalise across matches. Whether they also generalise to the competition match depends on how well the dev set imitates it (see limitations).
+
 **With the label-free gap test.** Smart Tagging doesn't exist for the sample matches, so the tag weight was chosen with `gapcheck.py`:
 1. Run the pipeline on our match with the tracked ball and keep its answer as the reference.
 2. Hide the ball in random 5–20 s windows where it *was* tracked (8.7% of the video).
@@ -180,18 +190,21 @@ An earlier version of this test also exposed a design flaw. A tag prior applied 
 - H 55,160 frames, A 35,689, D 68,008 (43% of graded frames are dead ball, in line with what the dev set predicts for its matches)
 - home share of live play 61%
 
-**Dev set (two other matches, four noise runs):** spellF1 0.481, macroF1 0.714.
+**Dev set (two other matches, four noise runs):** spellF1 0.485, macroF1 0.717.
 
 **Public 5 minutes, as a correctness check:**
 
 | | spellF1 | macroF1 | dead-ball F1 | possessions (truth 17) |
 |---|---|---|---|---|
-| this submission | **0.566** | **0.799** | 0.70 | 12 |
+| this submission | **0.538** | **0.795** | 0.70 | 12 |
+| dev-tuned, before boundary snapping | 0.566 | 0.799 | 0.70 | 12 |
 | the version before dev-set tuning | 0.471 | 0.674 | 0.41 | 17 |
 | baseline_smooth50 (published floor) | 0.326 | 0.621 | | 26 |
 | baseline_smooth125 | 0.424 | 0.581 | | 16 |
 
-The public window improved by about as much as the dev set did, even though it took no part in the tuning. Where hand-overs are matched, our median boundary error is −1.5 frames. A one-frame offset is free on spellF1.
+The dev-set tuning improved the public window by about as much as it improved the dev set, even though the window took no part in the tuning.
+
+Boundary snapping went the other way on the public window: 0.566 → 0.538. That's one possession matched differently out of 17, which is within the noise the organisers warn about. We kept snapping because it improved all four dev runs, across about 665 possessions. Choosing on the public window is exactly what the organisers show picks the wrong variant. Where hand-overs are matched, our median boundary error is 0 frames, and a one-frame offset is free on spellF1.
 
 ## Limitations, and what we would do with more time
 
@@ -199,7 +212,7 @@ The public window improved by about as much as the dev set did, even though it t
   - better evidence at receptions, such as using the ball's direction change and the player's speed
   - a learned model of the evidence, trained on the dev set
 - **Dead ball is over-predicted** (about 43% against a likely 25–30%). It pays on spellF1 in the dev set, but it costs macroF1 and might not transfer exactly. A stoppage detector trained on the dev labels would be the next step.
-- **The dev set is only an approximation of our data.**
+- **The dev set is only an approximation of our data.** Leaving one match out shows the settings carry across the two sample matches. It can't show they carry to ours if ours differs from both.
   - Its labels come from events, not from corrected tracking.
   - Its ball gaps lean towards dead ball more than ours.
   - Smart Tagging can't be tested on it.
@@ -224,6 +237,7 @@ Optional, to reproduce how the settings were chosen:
 # dev set: put Metrica sample games 1 and 2 in data/external/ (see devset.py), then
 .venv/bin/python devset.py            # score the current settings on the dev set, about 30 s
 .venv/bin/python devset.py --sweep    # the coordinate-descent sweep, about 10 min
+.venv/bin/python devset.py --lomo     # leave one match out, about 10 min
 .venv/bin/python gapcheck.py          # the label-free gap test, about 40 s
 ```
 
@@ -231,8 +245,9 @@ Optional, to reproduce how the settings were chosen:
 - a 3-frame deflection must not split a possession
 - a stoppage between two home possessions must survive
 - a throw-in must open a stoppage and close it
+- snapping must move a late boundary to the new team's first touch, and never past a later touch by the old team
 
-The output is deterministic, and two runs give the same file (SHA-1 `7e7fa955c7b145802eb28c29b74f20bdbd661564`).
+The output is deterministic, and two runs give the same file (SHA-1 `4236f484e8d92ac15a15acc14bd9f65d8512b4e4`).
 
 Files:
 - `possession.py`: the whole pipeline

@@ -2,6 +2,7 @@
 
     python devset.py            # score the current pipeline settings
     python devset.py --sweep    # coordinate-descent search over the pipeline's priors
+    python devset.py --lomo     # leave one match out: tune on one match, score on the other
 
 Data (public, not redistributed here): https://github.com/metrica-sports/sample-data
 Put Sample_Game_1_* and Sample_Game_2_* files in data/external/ (gitignored).
@@ -169,12 +170,46 @@ def sweep(games, rounds=2):
     return {name: getattr(P, name) for name in SEARCH}
 
 
+# the hand-set priors before any dev-set tuning, to measure what tuning buys on an unseen match
+START = {"SLOW_PLAYERS": 1.0, "KICK_SPEED": 6.0, "EVENT_DEAD": 2.0, "RECEPTION": 0.0,
+         "TEAM_SWITCH": 15.0, "DEAD_SWITCH": 20.0, "PLACED_BALL": 0.5, "SHAPE_WEIGHT": 0.2}
+
+
+def lomo():
+    """Leave one match out: tune from the hand-set priors on one match, score on the other.
+    If tuning on one match helps the match it never saw, the settings generalise."""
+    current = {name: getattr(P, name) for name in SEARCH}
+    rows = []
+    for tune_g, test_g in ((1, 2), (2, 1)):
+        tune = [load_game(tune_g, h) for h in (False, True)]
+        test = [load_game(test_g, h) for h in (False, True)]
+        for name, v in START.items():
+            setattr(P, name, v)
+        base = score(test, shape_weight=P.SHAPE_WEIGHT)[0]
+        tuned = sweep(tune)
+        held = score(test, shape_weight=P.SHAPE_WEIGHT)[0]
+        for name, v in current.items():
+            setattr(P, name, v)
+        both = score(test, shape_weight=P.SHAPE_WEIGHT)[0]
+        rows.append((tune_g, test_g, base, held, both, tuned))
+    for name, v in current.items():
+        setattr(P, name, v)
+    print("\nleave one match out (spellF1 on the held-out match)")
+    for tune_g, test_g, base, held, both, tuned in rows:
+        print("  tune on {} -> test on {}: hand-set {:.4f}  tuned on other match {:.4f}  "
+              "submitted (tuned on both) {:.4f}".format(tune_g, test_g, base, held, both))
+        print("    settings found: {}".format(tuned))
+
+
 def dev_games():
     """Both matches under both noise conditions: four scored halves-pairs."""
     return [load_game(g, harsh) for harsh in (False, True) for g in GAMES]
 
 
 if __name__ == "__main__":
+    if "--lomo" in sys.argv:
+        lomo()
+        sys.exit()
     games = dev_games()
     for g, (_, ball, _, blocks, truth) in zip(GAMES * 2, games):
         graded = truth != "X"
