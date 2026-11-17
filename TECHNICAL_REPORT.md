@@ -254,8 +254,8 @@ The match data goes in `data/` exactly as delivered (see `DATA.md`). It is gitig
 
 ```bash
 python3.11 -m venv .venv && .venv/bin/pip install -r requirements-solution.txt
-.venv/bin/python possession.py <team_name>.csv      # about 3 s; uses the committed evidence_model.json
-.venv/bin/python evaluation/validate_submission.py <team_name>.csv
+.venv/bin/python possession.py "Rondo Forest.csv"      # about 3 s; uses the committed evidence_model.json
+.venv/bin/python evaluation/validate_submission.py "Rondo Forest.csv"
 ```
 
 Optional, to reproduce how the model and settings were made (put Metrica sample games 1 and 2 in `data/external/`, see `devset.py`):
