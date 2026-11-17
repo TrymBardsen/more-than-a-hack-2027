@@ -3,6 +3,19 @@
 **Organised by [Metrica Sports](https://metrica-sports.com), [FC Barcelona](https://www.fcbarcelona.com)
 and the [Mobile World Capital Barcelona](https://www.mwcbarcelona.com)**, at the Talent Arena in Barcelona.
 
+> **Our solution.** [`possession.py`](possession.py) is the whole pipeline, and
+> [`TECHNICAL_REPORT.md`](TECHNICAL_REPORT.md) explains it. With the match data in `data/` (see
+> [DATA.md](DATA.md)), this regenerates the submission byte for byte in about 4 seconds:
+>
+> ```bash
+> python3.11 -m venv .venv && .venv/bin/pip install -r requirements-solution.txt
+> .venv/bin/python possession.py <team_name>.csv
+> .venv/bin/python evaluation/validate_submission.py <team_name>.csv
+> ```
+>
+> [`gapcheck.py`](gapcheck.py) is the label-free test we used to choose between variants. The rest
+> of this README is the organisers' original challenge description.
+
 A football data challenge on real professional match data, open to analysts, data scientists and
 engineers. You are given one complete LaLiga match — two camera feeds, automatic tracking of every
 player and the ball, automatic tactical tagging, and the camera-to-pitch geometry — and one

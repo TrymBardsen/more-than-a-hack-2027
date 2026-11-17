@@ -100,7 +100,14 @@ None from humans. The only learned component is the team-shape logistic regressi
 
 ## How we chose between versions without labels
 
-The public window has 17 possessions. The organisers show that ranking variants on it picks the wrong one, so we used it only to check that frames line up and labels mean what we think.
+The public window has 17 possessions. The organisers show that ranking variants on it picks the wrong one, so no constant, threshold or weight was fitted to it, and it took no part in the gap test below.
+
+We did score each version against it as we built them, and that shaped where we spent effort:
+- **v1** had only nearest-player team evidence and a slow-players dead-ball signal. On the public window it found about 6% of dead-ball frames. That told us the dead-ball side was the weak part, and v2 added the stoppage detector.
+- **v2's thresholds** came from football rules and the unlabeled whole-match distributions, not from the public window: placed ball under 0.5 m/s, kick over 6 m/s, line margin 1 m.
+- **The pre-kickoff rule** came from the published fact that the second half is graded from frame 110,808 but kicks off at 113,742 (FAQ.md). It is implemented from the Smart Tagging kickoff tag, not from those frame numbers.
+
+Beyond that the window served as a correctness check: frames aligned, file well-formed, labels meaning what we think.
 
 To compare ways of bridging ball gaps we built a label-free test, `gapcheck.py`:
 1. Run the pipeline with the tracked ball and keep its answer as the reference.
@@ -119,6 +126,8 @@ Three random masks are averaged. Results:
 | **tags 0.2 + shape 0.2 (submitted)** | **0.9246** | **0.693** |
 
 The spellF1 differences are small. The priors mostly matter for team agreement during gaps, where they recover about 4.5 points over holding the last team.
+
+This test measures consistency, not correctness. The reference is the pipeline's own answer with the ball tracked, and that answer has errors of its own. A variant wins by reproducing those labels when the ball is hidden. So the test can rank ways of bridging gaps, but it says nothing about how close the reference is to the truth.
 
 The test also chose the shape features. With eight features (centroids, velocities, spreads) the best variant reached 0.687 agreement. Adding back-line height, most advanced player and attacking-half occupancy raised the shape model's own agreement from 77% to 79% and the gap-test best to 0.693.
 
@@ -143,6 +152,7 @@ Where hand-overs are matched, our median boundary error is −1.5 frames. A one-
 
 ## Limitations, and what we would do with more time
 
+- **Short possessions and hand-over timing.** On the public window only 4 of the 20 changes of state land within 1 s of the truth. The possession count matches (17 against 17), but several short possessions are merged or shifted, and the score comes mostly from long possessions. The fixed switching cost is the main cause (see below).
 - **Dead ball is still the weakest class.** Many short stoppages, such as fouls where the ball stays on the pitch and play restarts quickly, produce no line crossing, no placed ball and no tag. A trained stoppage detector would help: one using referee-style cues, such as all players decelerating together or a wall forming.
 - **Ball gaps.** During long gaps we recover about 69% of team frames in the hidden-ball test. Better options:
   - a richer shape model, e.g. per-player pressure features or a small sequence model trained on the same pseudo-labels
