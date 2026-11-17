@@ -3,9 +3,10 @@
 **Organised by [Metrica Sports](https://metrica-sports.com), [FC Barcelona](https://www.fcbarcelona.com)
 and the [Mobile World Capital Barcelona](https://www.mwcbarcelona.com)**, at the Talent Arena in Barcelona.
 
-> **Our solution.** [`possession.py`](possession.py) is the whole pipeline, and
-> [`TECHNICAL_REPORT.md`](TECHNICAL_REPORT.md) explains it. With the match data in `data/` (see
-> [DATA.md](DATA.md)), this regenerates the submission byte for byte in about 4 seconds:
+> **Our solution.** [`possession.py`](possession.py) is the whole pipeline.
+> [`REPORT.md`](REPORT.md) explains it in a few pages, and
+> [`TECHNICAL_REPORT.md`](TECHNICAL_REPORT.md) has the full detail. With the match data in `data/`
+> (see [DATA.md](DATA.md)), this regenerates the submission byte for byte in about 3 seconds:
 >
 > ```bash
 > python3.11 -m venv .venv && .venv/bin/pip install -r requirements-solution.txt

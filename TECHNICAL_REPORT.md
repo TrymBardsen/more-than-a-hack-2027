@@ -1,6 +1,10 @@
-# Frame-level possession from automatic tracking
+# Frame-level possession from automatic tracking: technical report
 
-More than a Hack 2027 · FC Barcelona v Athletic Club · technical document
+More than a Hack 2027 · FC Barcelona v Athletic Club
+
+This is the detailed companion to [REPORT.md](REPORT.md), which is the main, short report. Here
+are the full feature list, the training and tuning protocol, every experiment we kept or dropped,
+and the numbers behind each decision.
 
 ## Summary
 
