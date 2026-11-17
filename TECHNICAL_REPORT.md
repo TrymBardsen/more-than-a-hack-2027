@@ -231,7 +231,11 @@ On this window the per-frame measures improved with the learned model and spellF
   - 64.6% get the right team, 17.4% the wrong team, and 18.0% are labelled dead.
   - Most of the false dead ball comes from the slow-players signal (76%, including frames where the stoppage detector also fired). Players stroll during slow build-up, as they do at stoppages.
   - We tried counting slow players in full only when a stoppage was confirmed (stoppage detector active, or the ball vanished within 3 m of a line). At weight 0 for unconfirmed slowness this cut false dead on live play from 18% to 8%, but it also cut dead-ball recall from 86% to 47% and spellF1 from 0.545 to 0.512. Intermediate weights were in between, so we dropped the idea: slow players are the main way real stoppages get caught.
-  - The wrong-team share is the other half of the gap. Deciding each gap as a whole would target it: who touched the ball at each end, plus a turnover signal.
+  - For the wrong-team share we tried giving the model the structure of each stretch between clear touches:
+    - the side of the touch before and after, weighted by how near this frame is to each
+    - whether both ends are the same team
+    - how long the stretch is
+  - Scored across matches, spellF1 stayed at 0.544–0.546 (0.545 without), and the wrong-team rate on live play with the ball hidden rose from 17% to 21–22%. The model already sees the last and next touch through its touch-context inputs, so we dropped it. A real fix probably needs information the tracking doesn't give while the ball is missing: our own ball detection, or a sequence model trained on far more labelled matches.
 - **Dead ball** is still hand-built and over-predicted: 39% predicted on the dev set against 26.5% in its labels, and 40% on our match. The dev labels themselves miss stoppages that have no event, such as offside or fouls without a FAULT RECEIVED, so part of the gap is in the labels. A learned dead-ball model was left out because the sample data drops the ball when it goes out: it would learn "ball missing means dead", which is much less true in our tracking.
 - **The dev set is an approximation of our data.**
   - Its labels come from events, not corrected tracking.
