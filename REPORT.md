@@ -23,6 +23,20 @@ The ranking metric scores whole possessions, not frames. A system that is right 
 3. **Is the ball dead.** A stoppage starts when the ball crosses a line, sits still for a set piece, or a set-piece tag begins, and it ends at the next kick. Players slowing down as a group also points to a stoppage, and each half is dead until its kickoff.
 4. **From frames to possessions.** A Viterbi decoder picks the most likely sequence of `H`, `A` and `D`. Every change of state has a cost, so possession only changes when the evidence for it is strong and lasts. A deflection or a single noisy frame can't split a possession.
 
+### Key numbers
+
+| Part | Setting |
+|---|---|
+| Team model | Two logistic regressions with 21 inputs each: one for when the ball is tracked, one for when it's missing. Trained on every frame twice, once as recorded and once with home and away swapped, so they can't learn a lean towards either side. |
+| Team evidence | The models' log-odds that home has the ball: full weight where the ball is tracked, 0.25 where it's missing, capped at ±6 per frame |
+| Controlled touch | A ball arriving faster than 6 m/s that leaves slower than 3 m/s within about 0.3 s, within 1.5 m of a player |
+| Decoder costs | 15 for a change of team, 30 for entering or leaving dead ball, in the same log-odds units. One frame can never pay for a change on its own. |
+| Stoppage start | Ball more than 1 m past a line; or ball still (under 0.3 m/s over 1.5 s); or a set-piece tag |
+| Stoppage end | The next kick on the pitch (ball faster than 4 m/s), at least 1 s after the stoppage began |
+| Slow players | Group mean speed over ±2 s below 1.5 m/s counts towards dead ball |
+| Before kickoff | Dead at full strength, with no team evidence, until the kick that the kickoff tag announces |
+| Tag hint while the ball is missing | ±0.4 per frame, from the team named by Smart Tagging's attacking and defending phases |
+
 ## What we used, and what we dropped
 
 | Asset | Used? | How |
@@ -34,14 +48,23 @@ The ranking metric scores whole possessions, not frames. A system that is right 
 | Audio track | Tested, dropped | Referee whistles were too faint to separate from the crowd |
 | Video images, broadcast feed | No | Our own ball detection would take days for an uncertain gain; the broadcast isn't synchronised to the tactical video |
 
+## Missing and noisy tracking
+
+- **The ball is missing on 41% of graded frames,** mostly in gaps longer than 5 seconds, so interpolation can't fill them. A separate model handles those frames. It knows who touched the ball last and who touches it next (fading over about 5 s) and how both teams are shaped, and the Smart Tagging hint adds to it.
+- **Tracker jumps.** Ball detections that move more than 2 m in one frame (over 50 m/s) are dropped as errors, and ball speed is computed from positions.
+- **Track slots aren't people.** Players appear, vanish and swap slots, so every feature is team-level: each team's nearest player to the ball, centroid, spread, back line (its second-deepest player, which skips the keeper) and most advanced player.
+- **Noise-hardened training.** The sample matches we trained on were given this match's ball-missing pattern and random player dropouts (about 7% of players missing), so the models learned from tracking as noisy as ours.
+
 ## Training data
 
 - **No labels on the competition match were used**, by hand or otherwise.
-- **The public 5 minutes of ground truth were used only to check** that our output was aligned and well-formed, never to train or tune.
-- **Everything learned or tuned came from Metrica's open sample games 1 and 2** ([github.com/metrica-sports/sample-data](https://github.com/metrica-sports/sample-data)). RULES.md explicitly allows labels from other games.
+- **The public 5 minutes of ground truth were used only as a check:** that our output was aligned and well-formed, and how each version behaved. Nothing was trained or tuned on them, and no version was chosen by its score there. An early version's weak dead-ball result there is what pointed us towards the stoppage detector.
+- **The learned model, and all labelled tuning, used Metrica's open sample games 1 and 2** ([github.com/metrica-sports/sample-data](https://github.com/metrica-sports/sample-data)). RULES.md explicitly allows labels from other games.
   - Their event data (3,680 events, produced by Metrica) was turned into frame labels with the challenge's own possession rules. We labelled nothing by hand.
   - To make those cleaner matches resemble ours, we copied in this match's real pattern of missing-ball frames and added player dropouts.
-  - Every setting was chosen by training on one sample match and testing on the other, so it couldn't simply memorise a match.
+  - The learned model's settings were chosen by training on one sample match and scoring the other.
+  - The stoppage thresholds and decoder costs were tuned on both sample matches, then checked by leaving one out: tuning on one match improved the unseen one by +0.065 and +0.049 spellF1.
+- **One setting was chosen on our own match, without labels.** The sample matches have no Smart Tagging, so the weight of the tag hint was set with a label-free test: hide the ball where it *was* tracked, and measure how consistently the pipeline recovers its own answer from when the ball was visible.
 
 ## Possession rules we implemented
 
