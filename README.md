@@ -13,8 +13,9 @@ and the [Mobile World Capital Barcelona](https://www.mwcbarcelona.com)**, at the
 > .venv/bin/python evaluation/validate_submission.py <team_name>.csv
 > ```
 >
-> [`gapcheck.py`](gapcheck.py) is the label-free test we used to choose between variants. The rest
-> of this README is the organisers' original challenge description.
+> Its settings were tuned on a labelled dev set built from Metrica's open sample matches
+> ([`devset.py`](devset.py)); [`gapcheck.py`](gapcheck.py) is the label-free test for the ball-gap
+> priors. The rest of this README is the organisers' original challenge description.
 
 A football data challenge on real professional match data, open to analysts, data scientists and
 engineers. You are given one complete LaLiga match — two camera feeds, automatic tracking of every

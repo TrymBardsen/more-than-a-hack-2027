@@ -43,15 +43,16 @@ MARGIN_SCALE = 1.0        # 1 m closer than the nearest opponent = 1 unit of tea
 FAST_BALL = 10.0          # ball faster than this is a pass/shot in flight, not control
 MAX_BALL_STEP = 2.0       # >2 m in one frame (50 m/s) is a tracker jump, drop the detection
 OUT_MARGIN = 1.0          # ball this far past a line is out of play
-SLOW_PLAYERS = 1.0        # group mean speed (m/s) below which play looks stopped (~20th pct, unlabeled)
+SLOW_PLAYERS = 1.5        # group mean speed (m/s) below which play looks stopped (dev-set tuned)
 SPEED_WINDOW = 50         # smooth group speed over 2 s
-PLACED_BALL = 0.5         # ball averaging under 0.5 m/s for 1.5 s is placed for a restart
-KICK_SPEED = 6.0          # a restart is the first time the ball moves faster than this, on the pitch
+PLACED_BALL = 0.3         # ball averaging under 0.3 m/s for 1.5 s is placed for a restart
+KICK_SPEED = 4.0          # a restart is the first time the ball moves faster than this, on the pitch
 MIN_DEAD = 25             # a stoppage lasts at least 1 s before a kick can end it
 MAX_DEAD = 120 * 25       # give up on a stoppage after 2 minutes without a visible restart
-EVENT_DEAD = 2.0          # per-frame dead evidence inside a detected stoppage
-TEAM_SWITCH = 15.0        # ~0.5 s of clear control needed to hand possession over
-DEAD_SWITCH = 20.0        # entering or leaving a stoppage costs more than a team switch
+EVENT_DEAD = 1.0          # per-frame dead evidence inside a detected stoppage
+RECEPTION = 4.0           # extra team evidence per frame at a reception (fast ball stopped at a player)
+TEAM_SWITCH = 25.0        # ~1 s of clear control needed to hand possession over (dev-set tuned)
+DEAD_SWITCH = 20.0        # cost of entering or leaving a stoppage (dev-set tuned)
 CLIP = 3.0                # cap on per-frame evidence so one frame never decides alone
 TAG_WEIGHT = 0.2          # Smart Tagging phase team, per frame, only where the ball is missing
 SHAPE_WEIGHT = 0.2        # team-shape model, per frame, only where the ball is missing
@@ -150,6 +151,11 @@ def features(players, ball, team_of_track, pitch, starts=frozenset()):
     nearest = np.fmin(d_home, d_away)
     weight = np.exp(-nearest / CONTROL_RADIUS) * np.where(ball_speed > FAST_BALL, 0.2, 1.0)
     team = np.clip(weight * (d_away - d_home) / MARGIN_SCALE, -CLIP, CLIP)
+    # reception: a ball arriving fast (>6 m/s) and leaving slow (<3 m/s) within ~0.3 s, next to a
+    # player, is a controlled touch by that player's team
+    before, after = np.roll(ball_speed, 4), np.roll(ball_speed, -4)
+    reception = (before > 6.0) & (after < 3.0) & (nearest < 1.5)
+    team = team + np.where(reception, RECEPTION * np.sign(d_away - d_home), 0.0)
     team = np.nan_to_num(team)                     # no ball -> no team evidence
 
     out = seen & ((bx < -OUT_MARGIN) | (bx > L + OUT_MARGIN) |
@@ -204,7 +210,7 @@ def tag_prior(n, game=GAME):
     return np.sign(vote)
 
 
-def shape_features(players, team_of_track, pitch, game=GAME):
+def shape_features(players, team_of_track, pitch, blocks):
     """Team-shape features from the home side's point of view, attacking direction normalised:
     centroid gap, forward velocity of each team, spread of each team. Works without the ball."""
     L, W = pitch
@@ -216,7 +222,7 @@ def shape_features(players, team_of_track, pitch, game=GAME):
         f += [np.nanmean(x, 1), np.nanstd(x, 1), np.nanstd(y, 1)]
     cxh, sxh, syh, cxa, sxa, sya = f
     direction = np.zeros(len(px))                   # +1 where home attacks towards x = L
-    for _, first, last in half_video_blocks(game):
+    for first, last in blocks:
         sl = slice(first, last + 1)
         direction[sl] = 1.0 if np.nanmean(cxh[sl]) < np.nanmean(cxa[sl]) else -1.0
     vh = direction * np.gradient(rolling_mean(cxh, 12)) * 25
@@ -224,8 +230,11 @@ def shape_features(players, team_of_track, pitch, game=GAME):
     # direction-normalised x: 0 = own goal line for home, L = goal home attacks
     hx = np.where(direction[:, None] > 0, px, L - px)
     hxh, hxa = np.where(home, hx, np.nan), np.where(~home, hx, np.nan)
-    line_h = np.nanpercentile(hxh, 10, axis=1)      # home back line (robust to keeper)
-    line_a = np.nanpercentile(hxa, 90, axis=1)      # away back line, in home's frame
+    # back line = second-deepest player (skips the keeper); sorting with NaN as +inf is fast
+    deep_h = np.sort(np.where(np.isnan(hxh), np.inf, hxh), axis=1)
+    deep_a = np.sort(np.where(np.isnan(hxa), np.inf, L - hxa), axis=1)
+    line_h = np.where(np.isfinite(deep_h[:, 1]), deep_h[:, 1], np.nan)
+    line_a = np.where(np.isfinite(deep_a[:, 1]), L - deep_a[:, 1], np.nan)
     top_h, top_a = np.nanmax(hxh, axis=1), np.nanmin(hxa, axis=1)
     up_h = np.nanmean(hxh > L / 2, axis=1)          # share of home players in attacking half
     up_a = np.nanmean(hxa < L / 2, axis=1)          # share of away players in their attacking half
@@ -253,9 +262,9 @@ def shape_logit(X, model):
     return np.c_[np.ones(len(X)), (X - mu) / sd] @ w
 
 
-def decode(team, dead, game=GAME):
-    labels = np.full(source_frames("tactical", game), "X", dtype="<U1")
-    for _, first, last in half_video_blocks(game):
+def decode(team, dead, blocks):
+    labels = np.full(len(team), "X", dtype="<U1")
+    for first, last in blocks:
         labels[first:last + 1] = viterbi(team[first:last + 1], dead[first:last + 1])
     return labels
 
@@ -267,22 +276,25 @@ def inputs(game=GAME):
     return players, ball, team_of_each_track(meta)
 
 
-def label(game=GAME, ball=None, tag_weight=TAG_WEIGHT, shape_weight=SHAPE_WEIGHT, verbose=False):
-    """Full pipeline. `ball` overrides the tracked ball (used by gapcheck.py to hide it)."""
-    players, tracked, team_of_track = inputs(game)
-    ball = tracked if ball is None else ball
-    pitch = GAMES[game]["pitch"]
-    team, dead = features(players, ball, team_of_track, pitch, set_piece_starts(game))
-    dead = np.where(pre_kickoff(len(dead), game), np.maximum(dead, EVENT_DEAD), dead)
+def run(players, ball, team_of_track, pitch, blocks, starts=frozenset(), tag_vote=None,
+        dead_before=None, tag_weight=TAG_WEIGHT, shape_weight=SHAPE_WEIGHT, verbose=False):
+    """The pipeline on plain arrays, so any match in this format can go through it.
+    blocks: [(first, last)] frames to label; everything else is X. tag_vote: per-frame +1/-1/0
+    phase prior or None. dead_before: bool per frame forced towards dead (before kickoff)."""
+    team, dead = features(players, ball, team_of_track, pitch, starts)
+    if dead_before is not None:
+        # a rule, not a soft cue: before the kickoff the ball is dead, at full strength
+        dead = np.where(dead_before, CLIP, dead)
     seen = ~np.isnan(ball[:, 0])
     # priors only speak where the ball is missing; with the ball tracked, the touch decides
-    team = team + np.where(seen, 0.0, tag_weight * tag_prior(len(team), game))
-    labels = decode(team, dead, game)
+    if tag_vote is not None:
+        team = team + np.where(seen, 0.0, tag_weight * tag_vote)
+    labels = decode(team, dead, blocks)
     if shape_weight:
         # second pass: learn "which team has the ball" from team shape alone, using the first
         # pass's own labels on frames where the ball is tracked (algorithmic pseudo-labels, no
         # human labels), then add it as evidence where the ball is missing.
-        X = shape_features(players, team_of_track, pitch, game)
+        X = shape_features(players, team_of_track, pitch, blocks)
         train = seen & np.isin(labels, ["H", "A"])
         model = fit_logistic(X[train], (labels[train] == "H").astype(float))
         logit = np.clip(shape_logit(X, model), -CLIP, CLIP)
@@ -290,8 +302,19 @@ def label(game=GAME, ball=None, tag_weight=TAG_WEIGHT, shape_weight=SHAPE_WEIGHT
             acc = np.mean((logit[train] > 0) == (labels[train] == "H"))
             print("shape model: trained on {} frames, agreement {:.3f}".format(train.sum(), acc))
         team = team + np.where(seen, 0.0, shape_weight * logit)
-        labels = decode(team, dead, game)
+        labels = decode(team, dead, blocks)
     return labels
+
+
+def label(game=GAME, ball=None, tag_weight=TAG_WEIGHT, shape_weight=SHAPE_WEIGHT, verbose=False):
+    """The competition match. `ball` overrides the tracked ball (gapcheck.py hides it)."""
+    players, tracked, team_of_track = inputs(game)
+    ball = tracked if ball is None else ball
+    n = source_frames("tactical", game)
+    blocks = [(first, last) for _, first, last in half_video_blocks(game)]
+    return run(players[:n], ball[:n], team_of_track, GAMES[game]["pitch"], blocks,
+               set_piece_starts(game), tag_prior(n, game), pre_kickoff(n, game),
+               tag_weight, shape_weight, verbose)
 
 
 def _selftest():
