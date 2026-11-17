@@ -3,6 +3,8 @@
     python devset.py            # score the current pipeline settings
     python devset.py --sweep    # coordinate-descent search over the pipeline's priors
     python devset.py --lomo     # leave one match out: tune on one match, score on the other
+    python devset.py --train    # train the learned evidence model on both matches -> evidence_model.json
+    python devset.py --tune-learned   # tune its weights and switching costs, scored across matches
 
 Data (public, not redistributed here): https://github.com/metrica-sports/sample-data
 Put Sample_Game_1_* and Sample_Game_2_* files in data/external/ (gitignored).
@@ -21,6 +23,8 @@ Event -> label rules (the same ones the challenge describes):
   * frames before a period's kickoff and after its last event are X (ungraded)
 """
 
+import functools
+import json
 import os
 import sys
 
@@ -99,6 +103,7 @@ def ball_mask_from_match(period, n):
     return mask
 
 
+@functools.lru_cache(maxsize=4)
 def load_game(g, harsh=False, seed=0):
     """harsh=False: the sample's own ball gaps (it drops the ball when out of play, so its gaps lean
     towards dead ball) plus player dropouts. harsh=True: this match's ball-missing pattern on top."""
@@ -170,6 +175,92 @@ def sweep(games, rounds=2):
     return {name: getattr(P, name) for name in SEARCH}
 
 
+def training_rows(games):
+    """Learned-evidence inputs and targets (1 = home has the ball) on every labelled live frame."""
+    Fs, ys, ss = [], [], []
+    for players, ball, team_of_track, blocks, truth in games:
+        team, _, parts = P.features(players, ball, team_of_track, PITCH, parts=True)
+        F = P.evidence_features(team, parts, P.shape_features(players, team_of_track, PITCH, blocks))
+        m = np.isin(truth, ["H", "A"])
+        Fs.append(F[m]); ys.append((truth[m] == "H").astype(float)); ss.append(parts["seen"][m])
+    return np.concatenate(Fs), np.concatenate(ys), np.concatenate(ss)
+
+
+def mirror(F):
+    """The same frames with home and away swapped, column by column (see evidence_features and
+    shape_features for the column order). Training on both makes the model side-neutral: it can't
+    learn the sample matches' home possession share as a bias."""
+    M = F.copy()
+    for c in (0, 1, 2, 5, 6, 7):                    # home-positive evidence columns flip sign
+        M[:, c] = -F[:, c]
+    s = 8                                          # shape columns start here
+    # centroid gap in the attacking direction is side-neutral (the defending team is always nearer
+    # its own goal), so column s + 0 stays as it is
+    M[:, s + 1] = F[:, s + 0] - F[:, s + 1]        # home centroid -> away centroid, mirrored
+    M[:, s + 2], M[:, s + 3] = -F[:, s + 3], -F[:, s + 2]   # forward velocities swap
+    M[:, s + 4], M[:, s + 5] = -F[:, s + 4], -F[:, s + 5]   # spread differences flip
+    M[:, s + 8], M[:, s + 9] = F[:, s + 9], F[:, s + 8]     # back lines swap
+    M[:, s + 10], M[:, s + 11] = F[:, s + 11], F[:, s + 10] # most advanced players swap
+    M[:, s + 12] = -F[:, s + 12]                   # attacking-half occupancy difference
+    return M
+
+
+MIRROR = True
+
+
+def train(games):
+    """Two logistic regressions on the dev labels: ball tracked, and ball missing."""
+    F, y, seen = training_rows(games)
+    if MIRROR:
+        F, y, seen = np.r_[F, mirror(F)], np.r_[y, 1 - y], np.r_[seen, seen]
+    return {"seen": P.fit_logistic(F[seen], y[seen]), "gap": P.fit_logistic(F[~seen], y[~seen])}
+
+
+def cross_eval(**run_opts):
+    """Train the evidence model on one sample match, score the other; both directions."""
+    out = []
+    for a, b in ((1, 2), (2, 1)):
+        model = train([load_game(a, h) for h in (False, True)])
+        out.append(score([load_game(b, h) for h in (False, True)], model=model, **run_opts)[0])
+    return float(np.mean(out)), out
+
+
+LEARNED_SEARCH = {
+    "W_SEEN": [0.5, 1.0, 2.0],
+    "W_GAP": [0.1, 0.25, 0.5, 1.0],
+    "L_TEAM_SWITCH": [10.0, 15.0, 25.0],
+    "L_DEAD_SWITCH": [20.0, 30.0, 45.0],
+    "L_SNAP": [0, 50],
+}
+
+
+def sweep_learned(rounds=2):
+    """Coordinate descent for the learned path, every candidate scored on the match the model was
+    NOT trained on (cross_eval), so the choice can't reward memorising a match."""
+    best = cross_eval()[0]
+    print("start  cross-match spellF1 {:.4f}".format(best))
+    for r in range(rounds):
+        for name, values in LEARNED_SEARCH.items():
+            keep = getattr(P, name)
+            results = []
+            for v in values:
+                setattr(P, name, v)
+                results.append((cross_eval()[0], v))
+            top, v = max(results)
+            setattr(P, name, v if top > best + 1e-4 else keep)
+            best = max(best, top)
+            print("round {} {:<12} {}  -> {} ({:.4f})".format(
+                r + 1, name, " ".join("{}:{:.3f}".format(v, s) for s, v in results),
+                getattr(P, name), best), flush=True)
+    return {name: getattr(P, name) for name in LEARNED_SEARCH}
+
+
+def save_model(model, path=None):
+    with open(path or P.MODEL_PATH, "w") as f:
+        json.dump({k: {"mu": m[0].tolist(), "sd": m[1].tolist(), "w": m[2].tolist()}
+                   for k, m in model.items()}, f, indent=1)
+
+
 # the hand-set priors before any dev-set tuning, to measure what tuning buys on an unseen match
 START = {"SLOW_PLAYERS": 1.0, "KICK_SPEED": 6.0, "EVENT_DEAD": 2.0, "RECEPTION": 0.0,
          "TEAM_SWITCH": 15.0, "DEAD_SWITCH": 20.0, "PLACED_BALL": 0.5, "SHAPE_WEIGHT": 0.2}
@@ -207,6 +298,13 @@ def dev_games():
 
 
 if __name__ == "__main__":
+    if "--tune-learned" in sys.argv:
+        print(sweep_learned())
+        sys.exit()
+    if "--train" in sys.argv:
+        save_model(train([load_game(g, h) for g in GAMES for h in (False, True)]))
+        print("wrote", P.MODEL_PATH)
+        sys.exit()
     if "--lomo" in sys.argv:
         lomo()
         sys.exit()

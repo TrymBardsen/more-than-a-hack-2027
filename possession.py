@@ -22,6 +22,7 @@ fitted to the public 5 minutes. TECHNICAL_REPORT.md explains each choice.
 """
 
 import functools
+import json
 import io
 import os
 import sys
@@ -53,10 +54,17 @@ EVENT_DEAD = 1.0          # per-frame dead evidence inside a detected stoppage
 RECEPTION = 4.0           # extra team evidence per frame at a reception (fast ball stopped at a player)
 TEAM_SWITCH = 25.0        # ~1 s of clear control needed to hand possession over (dev-set tuned)
 DEAD_SWITCH = 20.0        # cost of entering or leaving a stoppage (dev-set tuned)
+MODEL_PATH = os.path.join(ROOT, "evidence_model.json")   # learned evidence; see devset.py --train
+USE_MODEL = True          # use the learned evidence model instead of the hand-made team score
+W_SEEN = 1.0              # weight of the learned log-odds where the ball is tracked (cross-match tuned)
+W_GAP = 0.25              # weight of the learned log-odds where the ball is missing (cross-match tuned)
+L_TEAM_SWITCH = 15.0      # H<->A switch cost on the learned path (cross-match tuned)
+L_DEAD_SWITCH = 30.0      # dead-ball switch cost on the learned path (cross-match tuned)
+L_SNAP = 0                # boundary snapping on the learned path: no gain there, so off
 SNAP = 50                 # move each H<->A boundary to the new team's first clear touch within +-2 s (dev-set tuned; 0 = off)
 TOUCH = 1.0               # team evidence at or above this counts as a clear touch for snapping
 CLIP = 3.0                # cap on per-frame evidence so one frame never decides alone
-TAG_WEIGHT = 0.2          # Smart Tagging phase team, per frame, only where the ball is missing
+TAG_WEIGHT = 0.4          # Smart Tagging phase team, per frame, only where the ball is missing (gap-test tuned)
 SHAPE_WEIGHT = 0.2        # team-shape model, per frame, only where the ball is missing
 
 
@@ -130,8 +138,9 @@ def stoppages(bx, by, ball_speed, starts, pitch):
     return dead
 
 
-def features(players, ball, team_of_track, pitch, starts=frozenset()):
-    """Per-frame team evidence (+ = home) and dead-ball evidence (+ = dead)."""
+def features(players, ball, team_of_track, pitch, starts=frozenset(), parts=False):
+    """Per-frame team evidence (+ = home) and dead-ball evidence (+ = dead). With parts=True also
+    the raw ingredients, which the learned evidence model uses."""
     L, W = pitch
     bx, by = ball[:, 0] * L, ball[:, 1] * W
     # drop single-frame tracker jumps
@@ -165,17 +174,60 @@ def features(players, ball, team_of_track, pitch, starts=frozenset()):
     dead = np.clip(2 * (SLOW_PLAYERS - np.nan_to_num(group_speed, nan=SLOW_PLAYERS)), -CLIP, CLIP)
     dead = np.where(out, CLIP, dead)
     raw_speed = 25 * np.hypot(np.diff(bx, prepend=np.nan), np.diff(by, prepend=np.nan))
-    dead = np.where(stoppages(bx, by, raw_speed, starts, pitch), np.maximum(dead, EVENT_DEAD), dead)
+    stopped = stoppages(bx, by, raw_speed, starts, pitch)
+    dead = np.where(stopped, np.maximum(dead, EVENT_DEAD), dead)
+    if parts:
+        return team.astype(np.float64), dead.astype(np.float64), {
+            "seen": seen, "stoppage": stopped, "margin": d_away - d_home, "nearest": nearest,
+            "ball_speed": ball_speed, "reception": np.where(reception, np.sign(d_away - d_home), 0.0)}
     return team.astype(np.float64), dead.astype(np.float64)
 
 
-def viterbi(team, dead):
+def touch_context(team, seen, fade=125):
+    """Side of the last and of the next clear touch (+1 home, -1 away), fading over ~5 s. This is
+    what carries "who had it" into and out of a ball gap."""
+    n = len(team)
+    idx = np.arange(n)
+    touch = np.where(seen & (np.abs(team) >= TOUCH), np.sign(team), 0.0)
+    has = touch != 0
+    last_i = np.maximum.accumulate(np.where(has, idx, -1))
+    next_i = np.minimum.accumulate(np.where(has, idx, n)[::-1])[::-1]
+    last = np.where(last_i >= 0, touch[np.maximum(last_i, 0)] * np.exp(-(idx - last_i) / fade), 0.0)
+    nxt = np.where(next_i < n, touch[np.minimum(next_i, n - 1)] * np.exp(-(next_i - idx) / fade), 0.0)
+    return last, nxt
+
+
+def evidence_features(team, parts, shape):
+    """Per-frame inputs of the learned evidence model: the hand-made score, its ingredients, the
+    touch context and the team shape. Every column is home-positive or side-neutral."""
+    seen = parts["seen"]
+    margin = np.where(seen, np.clip(np.nan_to_num(parts["margin"]), -10, 10), 0.0)
+    near = np.where(seen, np.clip(np.nan_to_num(parts["nearest"], nan=10.0), 0, 10), 0.0)
+    speed = np.where(seen, np.clip(np.nan_to_num(parts["ball_speed"]), 0, 30), 0.0)
+    last, nxt = touch_context(team, seen)
+    return np.c_[team, margin, margin * np.exp(-near / 2), near, speed, parts["reception"],
+                 last, nxt, shape]
+
+
+def load_model(path=None):
+    """The learned evidence model (two logistic regressions), or None if the file is absent."""
+    path = path or MODEL_PATH
+    if not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        raw = json.load(f)
+    return {k: tuple(np.array(raw[k][part]) for part in ("mu", "sd", "w")) for k in ("seen", "gap")}
+
+
+def viterbi(team, dead, team_switch=None, dead_switch=None):
     """Best H/A/D path. Scores: H +team/2, A -team/2, D +dead (live states get 0 dead score)."""
     n = len(team)
+    ts = TEAM_SWITCH if team_switch is None else team_switch
+    ds = DEAD_SWITCH if dead_switch is None else dead_switch
     emit = np.stack([team / 2, -team / 2, dead], axis=1)
-    trans = np.array([[0, -TEAM_SWITCH, -DEAD_SWITCH],
-                      [-TEAM_SWITCH, 0, -DEAD_SWITCH],
-                      [-DEAD_SWITCH, -DEAD_SWITCH, 0]])
+    trans = np.array([[0, -ts, -ds],
+                      [-ts, 0, -ds],
+                      [-ds, -ds, 0]])
     back = np.zeros((n, 3), dtype=np.int8)
     score = emit[0].copy()
     for t in range(1, n):                          # ponytail: python loop, ~80k steps/half, a few s
@@ -288,10 +340,11 @@ def snap(labels, touch, window):
     return out
 
 
-def decode(team, dead, blocks):
+def decode(team, dead, blocks, team_switch=None, dead_switch=None):
     labels = np.full(len(team), "X", dtype="<U1")
     for first, last in blocks:
-        labels[first:last + 1] = viterbi(team[first:last + 1], dead[first:last + 1])
+        labels[first:last + 1] = viterbi(team[first:last + 1], dead[first:last + 1],
+                                         team_switch, dead_switch)
     return labels
 
 
@@ -303,10 +356,19 @@ def inputs(game=GAME):
 
 
 def run(players, ball, team_of_track, pitch, blocks, starts=frozenset(), tag_vote=None,
-        dead_before=None, tag_weight=TAG_WEIGHT, shape_weight=SHAPE_WEIGHT, verbose=False):
+        dead_before=None, tag_weight=TAG_WEIGHT, shape_weight=SHAPE_WEIGHT, verbose=False,
+        model="default"):
     """The pipeline on plain arrays, so any match in this format can go through it.
     blocks: [(first, last)] frames to label; everything else is X. tag_vote: per-frame +1/-1/0
     phase prior or None. dead_before: bool per frame forced towards dead (before kickoff)."""
+    if model == "default":
+        model = load_model() if USE_MODEL else None
+        if USE_MODEL and model is None:
+            raise IOError("{} is missing; run `python devset.py --train` or set USE_MODEL = False"
+                          .format(MODEL_PATH))
+    if model is not None:
+        return run_learned(players, ball, team_of_track, pitch, blocks, starts, tag_vote,
+                           dead_before, tag_weight, model)
     team, dead = features(players, ball, team_of_track, pitch, starts)
     if dead_before is not None:
         # a rule, not a soft cue: before the kickoff the ball is dead, at full strength
@@ -332,6 +394,36 @@ def run(players, ball, team_of_track, pitch, blocks, starts=frozenset(), tag_vot
     if SNAP:
         touch = np.where(seen & (np.abs(team) >= TOUCH), np.sign(team), 0)
         labels = snap(labels, touch, SNAP)
+    return labels
+
+
+def run_learned(players, ball, team_of_track, pitch, blocks, starts, tag_vote, dead_before,
+                tag_weight, model):
+    """Same decoder, but team evidence is the learned log-odds that home has the ball, from one
+    model where the ball is tracked and one where it is missing. Dead-ball evidence is unchanged."""
+    team, dead, parts = features(players, ball, team_of_track, pitch, starts, parts=True)
+    seen = parts["seen"]
+    F = evidence_features(team, parts, shape_features(players, team_of_track, pitch, blocks))
+    logit = np.where(seen, W_SEEN * shape_logit(F, model["seen"]), W_GAP * shape_logit(F, model["gap"]))
+    team = np.clip(logit, -2 * CLIP, 2 * CLIP)
+    if dead_before is not None:
+        # before the kickoff nobody has the ball: dead at full strength, and no team evidence. The
+        # kickoff tag starts a few seconds before the kick, so carry the mask on through the
+        # stoppage the tag opens, up to the kick that closes it.
+        dead_before = dead_before.copy()
+        ends = np.flatnonzero(dead_before[:-1] & ~dead_before[1:]) + 1
+        for e in ends:
+            while e < len(dead_before) and parts["stoppage"][e]:
+                dead_before[e] = True
+                e += 1
+        dead = np.where(dead_before, CLIP, dead)
+        team = np.where(dead_before, 0.0, team)
+    if tag_vote is not None:
+        team = team + np.where(seen, 0.0, tag_weight * tag_vote)
+    labels = decode(team, dead, blocks, L_TEAM_SWITCH, L_DEAD_SWITCH)
+    if L_SNAP:
+        touch = np.where(seen & (np.abs(team) >= TOUCH), np.sign(team), 0)
+        labels = snap(labels, touch, L_SNAP)
     return labels
 
 

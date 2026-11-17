@@ -35,16 +35,17 @@ def hide_ball(ball, rng, share=0.3):
 
 
 VARIANTS = {
-    "v2 (no priors)": dict(tag_weight=0.0, shape_weight=0.0),
-    "shape 0.1": dict(tag_weight=0.0, shape_weight=0.1),
-    "tags 0.1 + shape 0.1": dict(tag_weight=0.1, shape_weight=0.1),
-    "tags 0.1 + shape 0.2": dict(tag_weight=0.1, shape_weight=0.2),
-    "tags 0.2 + shape 0.2": dict(tag_weight=0.2, shape_weight=0.2),
+    "no tag prior": dict(tag_weight=0.0),
+    "tags 0.1": dict(tag_weight=0.1),
+    "tags 0.2": dict(tag_weight=0.2),
+    "tags 0.4": dict(tag_weight=0.4),
+    "tags 0.8": dict(tag_weight=0.8),
+    "tags 1.2": dict(tag_weight=1.2),
 }
 
 if __name__ == "__main__":
     _, ball, _ = P.inputs()
-    ref = pm.label_codes(P.label(tag_weight=0.0, shape_weight=0.0))
+    ref = pm.label_codes(P.label(tag_weight=0.0))
     runs = pm.valid_runs(ref)
     masks = [hide_ball(ball, np.random.default_rng(seed)) for seed in range(3)]
     hidden = np.mean([np.isnan(m[:, 0]).mean() - np.isnan(ball[:, 0]).mean() for m in masks])
